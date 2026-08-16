@@ -1,491 +1,938 @@
-Tiny Bloomberg Stage 1 should prove one thing:
+ Yes. For **Day 1**, I would keep the scope extremely disciplined. The goal is not “build Tiny Bloomberg.” The goal is to prove the entire production path once:
 
-> Market data is collected automatically every day, preserved as history, and displayed on a small dependable page—even when your laptop is off.
+**SPY → Alpha Vantage → Cloudflare Worker → normalization → R2 → production verification.**
 
-## 1. Recommended architecture
+Cloudflare’s current tooling supports exactly this setup: Workers can be created with C3/Wrangler, TypeScript is first-class, R2 is exposed through a Worker binding, and secrets can be required and injected through `env`. ([Cloudflare Docs][1])
 
-Use Cloudflare for the entire first stage. Do not split the system between Cloudflare and AWS yet.
+# Day 1 — Foundation
 
-```mermaid
-flowchart TD
-    A["Cron Trigger<br/>23:00 UTC weekdays"] --> B["Cloudflare Worker"]
-    B --> C["Alpha Vantage API"]
-    B --> D["Validate and normalize"]
-    D --> E["R2 immutable history"]
-    D --> F["R2 latest snapshot"]
-    G["Tiny Bloomberg page"] --> B
-    B --> E
-    B --> F
+## Final architecture tonight
+
+```text
+                  Internet
+                     │
+                     ▼
+          POST /collect
+                     │
+             Cloudflare Worker
+                     │
+          ┌──────────┴──────────┐
+          │                     │
+          ▼                     ▼
+   Alpha Vantage             R2 bucket
+ TIME_SERIES_DAILY               │
+          │             ┌────────┴─────────┐
+          │             │                  │
+          ▼             ▼                  ▼
+     raw JSON      normalized JSON     latest.json
 ```
 
-Components:
+For Day 1:
 
-| Component          | Choice                        | Responsibility                              |
-| ------------------ | ----------------------------- | ------------------------------------------- |
-| Scheduler          | Cloudflare Cron Trigger       | Starts collection automatically             |
-| Collector/API      | Cloudflare Worker, TypeScript | Downloads, validates and serves data        |
-| Storage            | Cloudflare R2                 | Stores raw responses and normalized history |
-| Frontend           | Cloudflare Pages              | Displays the dashboard                      |
-| Market-data source | Alpha Vantage                 | Initial official API                        |
-| Monitoring         | Worker logs + health endpoint | Detects failed or stale collection          |
-| Source control     | GitHub                        | Code, deployment and change history         |
+```text
+symbol = SPY
+source = Alpha Vantage
+frequency = daily
+storage = Cloudflare R2
+trigger = manual HTTP request
+```
 
-Why Cloudflare first:
+**No Cron yet. No React. No charts. No database. No LLM. No multiple symbols.**
 
-* one platform and one deployment model;
-* R2 currently includes 10 GB-month free storage, one million monthly write operations and free internet egress;
-* scheduled Workers can run for up to 15 minutes;
-* no server, container or permanent process;
-* much simpler than your earlier Lambda–API Gateway–ECR route.
+---
 
-The current free Alpha Vantage allowance is 25 requests per day—enough for a carefully limited first universe. [Cloudflare R2 pricing](https://developers.cloudflare.com/r2/pricing/), [Worker limits](https://developers.cloudflare.com/workers/platform/limits/), [Alpha Vantage limits](https://www.alphavantage.co/support/).
+# 1. Create the repository
 
-## 2. Strict Stage 1 scope
+Repository:
 
-Stage 1 includes:
+```text
+tiny-bloomberg
+```
 
-* one data provider;
-* five market instruments;
-* one scheduled daily collection;
-* durable historical storage;
-* several transparent calculated metrics;
-* one public read-only dashboard;
-* health monitoring;
-* manual collection and recovery mechanism;
-* documented deployment.
+I would make it private initially.
 
-It excludes:
+Desired initial structure:
 
-* LLMs;
-* investment recommendations;
-* news or sentiment;
-* intraday streaming;
-* user accounts;
-* portfolio transactions;
-* sophisticated pipelines;
-* multiple providers;
-* databases;
-* AWS;
-* machine learning;
-* automated trading.
+```text
+tiny-bloomberg/
+├── src/
+│   └── index.ts
+├── test/
+├── wrangler.jsonc
+├── package.json
+├── tsconfig.json
+├── .gitignore
+└── README.md
+```
 
-This boundary matters. The first victory is reliability, not breadth.
+First checkpoint:
 
-## 3. Initial market universe
+```bash
+git init
+git add .
+git commit -m "chore: initialize tiny bloomberg"
+```
 
-Start with five liquid US-listed ETFs:
+Do not put API keys anywhere in Git.
 
-| Symbol | Meaning                      |
-| ------ | ---------------------------- |
-| SPY    | US large-cap market          |
-| QQQ    | Nasdaq growth and technology |
-| IWM    | US small caps                |
-| EEM    | Emerging markets             |
-| TLT    | Long-duration US Treasuries  |
+---
 
-This is an engineering test universe, not your final investment universe. It provides different asset behaviours while staying within one straightforward data API.
+# 2. Create the Cloudflare Worker
 
-After the mechanism proves reliable, we can replace or extend these with your actual holdings and European UCITS listings.
+Use Cloudflare's current project generator:
 
-## 4. Data collected
+```bash
+npm create cloudflare@latest -- tiny-bloomberg
+```
 
-For every symbol, retain the provider’s daily OHLCV data:
+Choose:
+
+```text
+Hello World example
+Worker only
+TypeScript
+Git: Yes
+Deploy: No
+```
+
+Cloudflare's generator installs Wrangler as part of the project, and local development is run with:
+
+```bash
+npx wrangler dev
+```
+
+Deployment later is:
+
+```bash
+npx wrangler deploy
+```
+
+([Cloudflare Docs][1])
+
+Run it once.
+
+You want:
+
+```text
+http://localhost:8787
+```
+
+to return something like:
+
+```json
+{
+  "service": "tiny-bloomberg",
+  "status": "ok"
+}
+```
+
+Commit:
+
+```bash
+git add .
+git commit -m "feat: create cloudflare worker"
+```
+
+---
+
+# 3. Create the R2 bucket
+
+Use:
+
+```bash
+npx wrangler r2 bucket create tiny-bloomberg-data
+```
+
+Then verify:
+
+```bash
+npx wrangler r2 bucket list
+```
+
+Cloudflare currently supports creating and binding R2 buckets directly through Wrangler. ([Cloudflare Docs][2])
+
+Your storage will eventually look like:
+
+```text
+tiny-bloomberg-data/
+
+raw/
+    alphavantage/
+        daily/
+            SPY/
+                2026-08-16T14-30-12Z.json
+
+normalized/
+    daily/
+        SPY/
+            2026-08-16T14-30-12Z.json
+            latest.json
+```
+
+That namespace convention is worth establishing immediately.
+
+---
+
+# 4. Bind R2 to the Worker
+
+Add to `wrangler.jsonc`:
+
+```jsonc
+{
+  "name": "tiny-bloomberg",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-16",
+
+  "r2_buckets": [
+    {
+      "binding": "MARKET_DATA",
+      "bucket_name": "tiny-bloomberg-data"
+    }
+  ],
+
+  "secrets": {
+    "required": [
+      "ALPHA_VANTAGE_API_KEY",
+      "COLLECT_TOKEN"
+    ]
+  }
+}
+```
+
+The important abstraction is:
+
+```text
+MARKET_DATA
+```
+
+Your TypeScript code should never need to know anything about R2 credentials. Cloudflare injects the bucket through the Worker binding. ([Cloudflare Docs][2])
+
+Then regenerate Cloudflare types:
+
+```bash
+npx wrangler types
+```
+
+---
+
+# 5. Obtain the Alpha Vantage key
+
+Get a free Alpha Vantage key.
+
+For Day 1 use:
+
+```text
+TIME_SERIES_DAILY
+symbol=SPY
+outputsize=compact
+datatype=json
+```
+
+The API call conceptually becomes:
+
+```text
+https://www.alphavantage.co/query
+    ?function=TIME_SERIES_DAILY
+    &symbol=SPY
+    &outputsize=compact
+    &apikey=SECRET
+```
+
+`compact` currently returns the latest **100 daily data points** and works with free API keys. Full daily history requires premium access. ([Alpha Vantage][3])
+
+This is plenty for Tiny Bloomberg v0.
+
+---
+
+# 6. Store the API key correctly
+
+Production:
+
+```bash
+npx wrangler secret put ALPHA_VANTAGE_API_KEY
+```
+
+Paste your key when prompted.
+
+Cloudflare stores Worker secrets separately from source code; they are exposed at runtime through `env`. ([Cloudflare Docs][4])
+
+For local development create:
+
+```text
+.dev.vars
+```
+
+containing:
+
+```text
+ALPHA_VANTAGE_API_KEY="your-key-here"
+COLLECT_TOKEN="some-random-long-string"
+```
+
+And ensure `.gitignore` contains:
+
+```text
+.dev.vars*
+.env*
+```
+
+Cloudflare explicitly recommends keeping local secrets in `.dev.vars` or `.env` and excluding those files from Git. ([Cloudflare Docs][4])
+
+---
+
+# 7. Add one tiny security safeguard
+
+I would add one thing beyond your original plan:
+
+```text
+COLLECT_TOKEN
+```
+
+Why?
+
+Because otherwise anybody finding:
+
+```text
+https://tiny-bloomberg....workers.dev/collect
+```
+
+could burn your Alpha Vantage quota.
+
+Create the production secret:
+
+```bash
+npx wrangler secret put COLLECT_TOKEN
+```
+
+Then `/collect` requires:
+
+```http
+Authorization: Bearer YOUR_TOKEN
+```
+
+Tiny addition, worthwhile from day one.
+
+---
+
+# 8. Define the normalized data model
+
+Do **not** let Alpha Vantage's schema become your application's schema.
+
+Alpha Vantage might give you something like:
+
+```json
+{
+  "1. open": "642.31",
+  "2. high": "645.12",
+  "3. low": "639.40",
+  "4. close": "643.88",
+  "5. volume": "53123123"
+}
+```
+
+Tiny Bloomberg should store:
 
 ```json
 {
   "symbol": "SPY",
-  "marketDate": "2026-08-17",
-  "collectedAt": "2026-08-17T23:00:08Z",
-  "source": "alpha_vantage",
+  "date": "2026-08-14",
+  "open": 642.31,
+  "high": 645.12,
+  "low": 639.40,
+  "close": 643.88,
+  "volume": 53123123,
   "currency": "USD",
-  "open": 650.20,
-  "high": 654.40,
-  "low": 649.80,
-  "close": 653.10,
-  "adjustedClose": 653.10,
-  "volume": 63500210
+  "source": "alphavantage"
 }
 ```
 
-Calculate these simple metrics ourselves:
+Notice:
 
-* latest adjusted close;
-* daily return;
-* 5-trading-day return;
-* 20-trading-day return;
-* year-to-date return;
-* 20-day volatility, annualised;
-* distance from 50-day high;
-* data age.
+```text
+strings → numbers
+Alpha Vantage names → your names
+provider-specific structure → provider-independent structure
+```
 
-Formulas must be kept in code and documented. Alpha Vantage supplies observations; Tiny Bloomberg calculates the metrics.
+That separation will become extremely valuable later when you add another provider.
 
-No prediction, signal or “buy/sell” label in Stage 1.
+---
 
-## 5. Storage design
+# 9. Define the complete normalized snapshot
 
-R2 bucket: `tiny-bloomberg-data`
+I would store this structure:
+
+```json
+{
+  "schemaVersion": 1,
+  "symbol": "SPY",
+  "assetType": "ETF",
+  "currency": "USD",
+  "frequency": "daily",
+  "source": "alphavantage",
+  "collectedAt": "2026-08-16T14:30:12.482Z",
+  "bars": [
+    {
+      "date": "2026-08-14",
+      "open": 642.31,
+      "high": 645.12,
+      "low": 639.40,
+      "close": 643.88,
+      "volume": 53123123
+    }
+  ]
+}
+```
+
+Keep:
+
+```text
+schemaVersion: 1
+```
+
+from the beginning.
+
+Later you can change your internal schema without confusion.
+
+---
+
+# 10. Implement only three routes
+
+Your Worker should have:
+
+```text
+GET  /health
+POST /collect
+GET  /latest/SPY
+```
+
+Nothing else.
+
+### `/health`
+
+Returns:
+
+```json
+{
+  "service": "tiny-bloomberg",
+  "status": "ok"
+}
+```
+
+No API call.
+
+No R2 operation.
+
+---
+
+### `/collect`
+
+Flow:
+
+```text
+authenticate
+   ↓
+request SPY from Alpha Vantage
+   ↓
+validate response
+   ↓
+save raw JSON
+   ↓
+normalize JSON
+   ↓
+save normalized JSON
+   ↓
+update latest.json
+   ↓
+return success
+```
+
+---
+
+### `/latest/SPY`
+
+Reads:
+
+```text
+normalized/daily/SPY/latest.json
+```
+
+from R2.
+
+This becomes the primitive your UI can use later.
+
+---
+
+# 11. Worker implementation structure
+
+Keep Day 1 almost embarrassingly small.
+
+`src/index.ts` can conceptually contain:
+
+```typescript
+interface Env {
+  MARKET_DATA: R2Bucket;
+  ALPHA_VANTAGE_API_KEY: string;
+  COLLECT_TOKEN: string;
+}
+```
+
+Then:
+
+```typescript
+export default {
+  async fetch(request: Request, env: Env): Promise<Response> {
+    const url = new URL(request.url);
+
+    if (url.pathname === "/health") {
+      return Response.json({
+        service: "tiny-bloomberg",
+        status: "ok"
+      });
+    }
+
+    if (url.pathname === "/collect" && request.method === "POST") {
+      return collectSpy(request, env);
+    }
+
+    if (url.pathname === "/latest/SPY") {
+      return getLatest(env);
+    }
+
+    return new Response("Not found", { status: 404 });
+  }
+};
+```
+
+Then only two significant functions:
+
+```text
+collectSpy()
+normalizeDaily()
+```
+
+Do **not** introduce classes, repositories, dependency injection or ten modules yet.
+
+---
+
+# 12. Call Alpha Vantage
+
+Inside `collectSpy()`:
+
+```typescript
+const symbol = "SPY";
+
+const apiUrl = new URL(
+  "https://www.alphavantage.co/query"
+);
+
+apiUrl.searchParams.set("function", "TIME_SERIES_DAILY");
+apiUrl.searchParams.set("symbol", symbol);
+apiUrl.searchParams.set("outputsize", "compact");
+apiUrl.searchParams.set(
+  "apikey",
+  env.ALPHA_VANTAGE_API_KEY
+);
+
+const response = await fetch(apiUrl);
+
+if (!response.ok) {
+  throw new Error(
+    `Alpha Vantage HTTP ${response.status}`
+  );
+}
+
+const raw = await response.json();
+```
+
+SPY stays **hardcoded**.
+
+That's intentional.
+
+Multi-symbol configuration comes later.
+
+---
+
+# 13. Validate Alpha Vantage's response
+
+This matters because APIs sometimes return HTTP `200` but the JSON contains an error or quota message.
+
+Check that:
+
+```typescript
+raw["Time Series (Daily)"]
+```
+
+exists.
+
+Also detect:
+
+```text
+Error Message
+Note
+Information
+```
+
+If the time series is missing:
+
+```typescript
+throw new Error(
+  "Alpha Vantage returned no daily series"
+);
+```
+
+Most important rule:
+
+> **Never write an API error message into R2 as though it were market data.**
+
+---
+
+# 14. Save the raw response first
+
+Before normalization, preserve the source payload.
+
+Generate:
+
+```typescript
+const collectedAt = new Date().toISOString();
+```
+
+Make it path-safe:
+
+```typescript
+const storageTimestamp =
+  collectedAt.replace(/:/g, "-");
+```
+
+Object key:
+
+```text
+raw/alphavantage/daily/SPY/
+2026-08-16T14-30-12.482Z.json
+```
+
+Write:
+
+```typescript
+await env.MARKET_DATA.put(
+  rawKey,
+  JSON.stringify(raw),
+  {
+    httpMetadata: {
+      contentType: "application/json"
+    }
+  }
+);
+```
+
+Cloudflare R2 bindings expose `put()` directly to Workers. ([Cloudflare Docs][2])
+
+Now you have immutable source evidence.
+
+---
+
+# 15. Normalize
+
+Transform:
+
+```text
+Time Series (Daily)
+```
+
+into:
+
+```typescript
+bars: DailyBar[]
+```
+
+For every date:
+
+```typescript
+{
+  date,
+  open: Number(row["1. open"]),
+  high: Number(row["2. high"]),
+  low: Number(row["3. low"]),
+  close: Number(row["4. close"]),
+  volume: Number(row["5. volume"])
+}
+```
+
+Sort newest first:
+
+```typescript
+bars.sort(
+  (a, b) => b.date.localeCompare(a.date)
+);
+```
+
+Then construct:
+
+```typescript
+const normalized = {
+  schemaVersion: 1,
+  symbol: "SPY",
+  assetType: "ETF",
+  currency: "USD",
+  frequency: "daily",
+  source: "alphavantage",
+  collectedAt,
+  bars
+};
+```
+
+---
+
+# 16. Store normalized data
+
+Write immutable normalized snapshot:
+
+```text
+normalized/daily/SPY/
+2026-08-16T14-30-12.482Z.json
+```
+
+Then write:
+
+```text
+normalized/daily/SPY/latest.json
+```
+
+with the same normalized object.
+
+So your R2 bucket contains:
 
 ```text
 raw/
-  alpha-vantage/
-    2026/
-      08/
-        17/
-          SPY.json
-          QQQ.json
+└── alphavantage/
+    └── daily/
+        └── SPY/
+            └── 2026-08-16T14-30-12Z.json
 
-snapshots/
-  2026/
-    08/
-      17.json
-
-series/
-  SPY.json
-  QQQ.json
-  IWM.json
-  EEM.json
-  TLT.json
-
-system/
-  latest.json
-  health.json
-  runs/
-    2026-08-17T23-00-00Z.json
+normalized/
+└── daily/
+    └── SPY/
+        ├── 2026-08-16T14-30-12Z.json
+        └── latest.json
 ```
 
-Rules:
+This is already the beginning of a real data lake.
 
-1. `raw/` is immutable—the exact provider response.
-2. `snapshots/` is immutable—our normalized daily result.
-3. `series/` is a convenient, replaceable dashboard projection.
-4. `latest.json` makes the homepage fast.
-5. Every run receives its own audit record.
-6. Re-running a date must not create duplicate market observations.
+---
 
-The immutable snapshots are the source of truth. Everything else can later be rebuilt from them.
+# 17. Return an informative collection response
 
-## 6. Collection workflow
-
-The Cron Trigger runs Monday–Friday at 23:00 UTC.
-
-For each symbol:
-
-1. Request daily adjusted data.
-2. Check HTTP status.
-3. Detect API error and rate-limit messages.
-4. Save the raw response.
-5. Validate required fields and number formats.
-6. Determine the latest market date.
-7. Reject dates in the future.
-8. Check whether that market date already exists.
-9. Normalize the observation.
-10. Update the bounded series file.
-11. Calculate metrics.
-12. Update `latest.json`.
-13. Write the collection-run report.
-
-A market holiday is not an error. If the provider returns the previously stored market date, the collector records a successful no-change run.
-
-One failed symbol must not destroy the entire batch. The other four should still be stored.
-
-## 7. Reliability rules
-
-“Always working” does not mean failures never happen. It means failures are visible and recoverable.
-
-Implement these safeguards:
-
-* **Idempotency:** rerunning the collector cannot duplicate data.
-* **Timeouts:** each external request has a fixed timeout.
-* **Retries:** retry temporary failures twice with short backoff.
-* **Validation:** never publish malformed data as current data.
-* **Partial success:** process symbols independently.
-* **Last-known-good data:** the page remains usable after a failed collection.
-* **Freshness warning:** mark data stale after two expected collection windows.
-* **Run journal:** every collection attempt produces a status record.
-* **Secret isolation:** API key exists only as a Worker secret.
-* **Manual recovery:** protected endpoint or CLI command can rerun collection.
-* **No silent gaps:** health endpoint identifies missing symbols and dates.
-
-Use structured logs such as:
+Successful `/collect`:
 
 ```json
 {
-  "event": "collection_completed",
-  "runId": "2026-08-17T23-00-00Z",
-  "requested": 5,
-  "succeeded": 5,
-  "failed": 0,
-  "latestMarketDate": "2026-08-17",
-  "durationMs": 4120
+  "status": "ok",
+  "symbol": "SPY",
+  "source": "alphavantage",
+  "records": 100,
+  "latestMarketDate": "2026-08-14",
+  "rawObject": "raw/alphavantage/daily/SPY/...",
+  "normalizedObject": "normalized/daily/SPY/...",
+  "collectedAt": "2026-08-16T14:30:12.482Z"
 }
 ```
 
-## 8. Worker endpoints
+This response becomes your first operational log.
 
-Public:
+---
 
-```text
-GET /api/latest
-GET /api/history?symbol=SPY&days=100
-GET /api/health
+# 18. Test locally first
+
+Run:
+
+```bash
+npx wrangler dev
 ```
 
-Protected:
+Cloudflare's default local Worker development uses local R2 storage rather than your production R2 bucket. ([Cloudflare Docs][2])
 
-```text
-POST /api/admin/collect
-POST /api/admin/rebuild-series
+Check:
+
+```bash
+curl http://localhost:8787/health
 ```
 
-The protected endpoints require an administrative bearer secret. The frontend never receives either the market-data key or administrative key.
-
-Example health response:
+Expected:
 
 ```json
 {
-  "status": "healthy",
-  "lastSuccessfulRun": "2026-08-17T23:00:08Z",
-  "latestMarketDate": "2026-08-17",
-  "symbolsExpected": 5,
-  "symbolsCurrent": 5,
-  "staleSymbols": [],
-  "failedSymbols": []
+  "service": "tiny-bloomberg",
+  "status": "ok"
 }
 ```
 
-## 9. First dashboard
+Then:
 
-Keep it compact and serious.
-
-### Header
-
-* Tiny Bloomberg
-* last successful update;
-* latest market date;
-* green, amber or red system status.
-
-### Market table
-
-| Symbol | Price | 1D | 5D | 20D | YTD | 20D volatility | From 50D high |
-| ------ | ----: | -: | -: | --: | --: | -------------: | ------------: |
-
-### Instrument detail
-
-Clicking a row opens:
-
-* instrument name;
-* latest metrics;
-* approximately 100 daily observations;
-* simple close-price line chart;
-* source and timestamp.
-
-Use plain HTML, CSS and TypeScript. A native SVG chart is sufficient. Avoid a heavy UI framework for this stage.
-
-The page must work cleanly on your iPhone as well as desktop.
-
-## 10. Repository structure
-
-```text
-tiny-bloomberg/
-  README.md
-  package.json
-  wrangler.jsonc
-
-  src/
-    worker.ts
-    config.ts
-
-    collector/
-      alpha-vantage.ts
-      collect.ts
-      normalize.ts
-      validate.ts
-
-    metrics/
-      returns.ts
-      volatility.ts
-      drawdown.ts
-
-    storage/
-      keys.ts
-      repository.ts
-
-    api/
-      latest.ts
-      history.ts
-      health.ts
-      admin.ts
-
-    types/
-      market.ts
-      provider.ts
-      system.ts
-
-  web/
-    index.html
-    styles.css
-    app.ts
-
-  test/
-    fixtures/
-    normalize.test.ts
-    metrics.test.ts
-    idempotency.test.ts
-    health.test.ts
-
-  docs/
-    architecture.md
-    data-contract.md
-    operations.md
+```bash
+curl \
+  -X POST \
+  http://localhost:8787/collect \
+  -H "Authorization: Bearer YOUR_TOKEN"
 ```
 
-## 11. Testing requirements
+Expected:
 
-Unit tests:
+```text
+status = ok
+symbol = SPY
+records > 0
+```
 
-* Alpha Vantage normalization;
-* percentage-return calculations;
-* annualised volatility;
-* missing fields;
-* provider error messages;
-* duplicate market date;
-* holiday/no-change response;
-* one-symbol failure;
-* stale-data classification.
+Then:
 
-Integration test:
+```bash
+curl http://localhost:8787/latest/SPY
+```
 
-1. Load a saved provider fixture.
-2. Run collection against a test bucket.
-3. Verify raw file.
-4. Verify normalized snapshot.
-5. Verify series update.
-6. Call `/api/latest`.
-7. Verify dashboard contract.
+You should see normalized market data.
 
-Do not make automated tests consume the real API allowance. Use recorded fixtures.
+---
 
-## 12. Implementation sequence
+# 19. Deploy
 
-### Day 1 — Sunday, 16 August: foundation
+Once local works:
 
-Target: one real symbol stored successfully.
+```bash
+npx wrangler deploy
+```
 
-1. Create GitHub repository.
-2. Create Cloudflare Worker project in TypeScript.
-3. Create R2 bucket.
-4. Obtain Alpha Vantage key.
-5. Save the key as a Worker secret.
-6. Implement collection for SPY only.
-7. Save raw and normalized JSON.
-8. Deploy.
-9. Confirm the data exists after deployment.
-10. Commit a working checkpoint.
+Cloudflare publishes it to your `*.workers.dev` endpoint. ([Cloudflare Docs][1])
 
-**Definition of done:** an online Worker downloads SPY data and stores it in R2.
+Example:
 
-### Day 2 — normalization and history
+```text
+https://tiny-bloomberg.<account>.workers.dev
+```
 
-Target: trustworthy data contracts.
+Check:
 
-* define TypeScript types;
-* implement validation;
-* add all five symbols;
-* create immutable daily snapshots;
-* implement idempotency;
-* add fixture-based tests.
+```bash
+curl https://...workers.dev/health
+```
 
-### Day 3 — scheduler and health
+Then execute the **real production collection**:
 
-Target: autonomous operation.
+```bash
+curl \
+  -X POST \
+  https://...workers.dev/collect \
+  -H "Authorization: Bearer YOUR_TOKEN"
+```
 
-* configure weekday Cron Trigger;
-* add run journal;
-* add `/api/health`;
-* implement stale-data rules;
-* add manual protected collection;
-* perform two manual reruns to prove idempotency.
+This request is the real milestone.
 
-### Day 4 — metrics API
+---
 
-Target: useful information.
+# 20. Verify production R2 — not local R2
 
-* implement returns;
-* implement volatility;
-* implement distance from high;
-* produce `latest.json`;
-* expose `/api/latest` and `/api/history`.
+This distinction matters.
 
-### Day 5 — dashboard
+`wrangler dev` normally uses local R2 storage, so local success does **not** prove production storage is working. ([Cloudflare Docs][2])
 
-Target: visible Tiny Bloomberg.
+After calling the deployed Worker, inspect the production R2 bucket.
 
-* create responsive page;
-* add status header;
-* add market table;
-* add detail chart;
-* deploy through Cloudflare Pages.
+You can also retrieve a known object using Wrangler:
 
-### Day 6 — failure testing
+```bash
+npx wrangler r2 object get \
+  tiny-bloomberg-data/normalized/daily/SPY/latest.json \
+  --remote \
+  --pipe
+```
 
-Target: recoverability.
+Wrangler's R2 object command supports fetching objects directly from remote R2 using `--remote`. ([Cloudflare Docs][5])
 
-Deliberately simulate:
+You want actual JSON printed in your terminal.
 
-* invalid API key;
-* provider timeout;
-* rate-limit response;
-* malformed JSON;
-* one missing symbol;
-* duplicate market date;
-* market holiday.
+That is the real **Definition of Done**.
 
-Verify that the last valid dashboard remains available.
+---
 
-### Day 7 — operational finish
+# 21. Final Git checkpoint
 
-Target: Stage 1 production baseline.
+Only once production works:
 
-* write deployment instructions;
-* write recovery procedure;
-* add architecture diagram;
-* verify seven-day storage structure;
-* check Cloudflare usage;
-* tag release `v0.1.0`.
+```bash
+git status
+```
 
-## 13. Stage 1 completion criteria
+Then:
 
-Stage 1 is complete only when:
+```bash
+git add .
+git commit -m "feat: collect SPY daily data into R2"
+git push
+```
 
-* collection runs without your computer;
-* it has succeeded automatically on at least five expected market days;
-* raw and normalized history are preserved;
-* rerunning does not create duplicates;
-* the dashboard reports its freshness;
-* a failed provider request does not erase valid data;
-* the API key is not visible in code, GitHub or the browser;
-* manual recovery is documented and tested;
-* operating cost remains zero under the current free limits;
-* you can explain every component and metric yourself.
+I would optionally tag this milestone:
 
-## 14. Your first 90-minute session tomorrow
+```bash
+git tag day-1-foundation
+git push origin day-1-foundation
+```
 
-Do only this:
+Now you have a known-good recovery point.
 
-1. Create `tiny-bloomberg`.
-2. Initialize the Cloudflare TypeScript Worker.
-3. Create and bind the R2 bucket.
-4. Add the API key as a secret.
-5. Fetch SPY.
-6. Store the raw response.
-7. Store one normalized record.
-8. retrieve that record through `/api/latest`.
-9. Commit and stop.
+---
 
-Do not build the dashboard tomorrow until this vertical slice works:
+# Day 1 acceptance checklist
 
-> API → Worker → R2 → API response.
+By the end, every statement below should be true:
 
-That small working spine is the beginning of the entire future platform.
-https://github.com/michalkordyzon/tiny-bloomberg
+* [ ] GitHub repository exists.
+* [ ] Worker project is TypeScript.
+* [ ] `/health` works locally.
+* [ ] `tiny-bloomberg-data` R2 bucket exists.
+* [ ] `MARKET_DATA` binding works.
+* [ ] Alpha Vantage API key is **not** in Git.
+* [ ] Worker can fetch real SPY daily data.
+* [ ] Invalid Alpha Vantage responses are rejected.
+* [ ] Original Alpha Vantage JSON is stored in `raw/`.
+* [ ] Provider-independent JSON is stored in `normalized/`.
+* [ ] `normalized/daily/SPY/latest.json` exists.
+* [ ] Production Worker is deployed.
+* [ ] Production Worker can perform `/collect`.
+* [ ] Production R2 contains the resulting objects.
+* [ ] `/latest/SPY` returns normalized data.
+* [ ] Working state is committed to Git.
+
+## Definition of done
+
+The strongest possible test is this:
+
+```text
+1. Open terminal.
+
+2. Call:
+   POST https://tiny-bloomberg...workers.dev/collect
+
+3. Receive:
+   status: ok
+   symbol: SPY
+   records: ~100
+
+4. Call:
+   GET https://tiny-bloomberg...workers.dev/latest/SPY
+
+5. Receive:
+   real SPY OHLCV JSON.
+
+6. Confirm:
+   normalized/daily/SPY/latest.json
+   physically exists in production R2.
+```
+
+At that moment, **Day 1 is finished. Stop building.**
+
+You will already have something important: not a mockup, but the first working artery of Tiny Bloomberg — **real external financial data flowing through your own code into persistent cloud storage**. Day 2 can then make it automatic.
+
+[1]: https://developers.cloudflare.com/workers/get-started/guide/ "Get started - CLI · Cloudflare Workers docs"
+[2]: https://developers.cloudflare.com/r2/api/workers/workers-api-usage/ "Use R2 from Workers · Cloudflare R2 docs"
+[3]: https://www.alphavantage.co/documentation/ "API Documentation | Alpha Vantage"
+[4]: https://developers.cloudflare.com/workers/configuration/secrets/ "Secrets · Cloudflare Workers docs"
+[5]: https://developers.cloudflare.com/workers/wrangler/commands/r2/ "R2 · Cloudflare Workers docs"
