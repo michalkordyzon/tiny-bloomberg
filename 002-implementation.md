@@ -488,3 +488,4 @@ Do not build the dashboard tomorrow until this vertical slice works:
 > API → Worker → R2 → API response.
 
 That small working spine is the beginning of the entire future platform.
+https://github.com/michalkordyzon/tiny-bloomberg
