@@ -10,7 +10,26 @@
 	"observability": {
 		"enabled": true
 	},
-	"upload_source_maps": true
+	"upload_source_maps": true,
+	// "r2_buckets": [
+	// 	{
+	// 		"bucket_name": "tiny-bloomberg-data",
+	// 		"binding": "tiny_bloomberg_data"
+	// 	}
+	// ]
+	"r2_buckets": [
+    {
+      "binding": "MARKET_DATA",
+      "bucket_name": "tiny-bloomberg-data"
+    }
+    ],
+
+	"secrets": {
+		"required": [
+		"ALPHA_VANTAGE_API_KEY",
+		"COLLECT_TOKEN"
+		]
+	}
 	/**
 	 * Smart Placement
 	 * https://developers.cloudflare.com/workers/configuration/smart-placement/#smart-placement
