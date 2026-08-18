@@ -190,6 +190,8 @@ Add to `wrangler.jsonc`:
     }
   ],
 
+  
+
   "secrets": {
     "required": [
       "ALPHA_VANTAGE_API_KEY",
@@ -395,7 +397,6 @@ from the beginning.
 Later you can change your internal schema without confusion.
 
 ---
-
 # 10. Implement only three routes
 
 Your Worker should have:
