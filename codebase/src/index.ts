@@ -1,6 +1,5 @@
 interface Env {
 	MARKET_DATA: R2Bucket;
-	ALPHA_VANTAGE_API_KEY: string;
 	COLLECT_TOKEN: string;
 }
 
@@ -13,20 +12,49 @@ interface DailyBar {
 	volume: number;
 }
 
-function normalizeDaily(raw: Record<string, unknown>, collectedAt: string) {
-	const series = raw['Time Series (Daily)'] as Record<string, Record<string, string>> | undefined;
-	if (!series) {
-		throw new Error('Alpha Vantage returned no daily series');
+function normalizeStooqDaily(csv: string, collectedAt: string) {
+	const lines = csv.trim().split(/\r?\n/);
+
+	if (lines.length < 2) {
+		throw new Error('Stooq returned no daily data');
 	}
 
-	const bars: DailyBar[] = Object.entries(series).map(([date, row]) => ({
-		date,
-		open: Number(row['1. open']),
-		high: Number(row['2. high']),
-		low: Number(row['3. low']),
-		close: Number(row['4. close']),
-		volume: Number(row['5. volume']),
-	}));
+	const header = lines[0].split(',');
+
+	const expectedHeader = ['Date', 'Open', 'High', 'Low', 'Close', 'Volume'];
+
+	if (header.length !== expectedHeader.length || !expectedHeader.every((value, index) => header[index] === value)) {
+		throw new Error(`Unexpected Stooq CSV header: ${lines[0]}`);
+	}
+
+	const bars: DailyBar[] = lines
+		.slice(1)
+		.filter(Boolean)
+		.map((line) => {
+			const [date, open, high, low, close, volume] = line.split(',');
+
+			return {
+				date,
+				open: Number(open),
+				high: Number(high),
+				low: Number(low),
+				close: Number(close),
+				volume: Number(volume),
+			};
+		});
+
+	for (const bar of bars) {
+		if (
+			!bar.date ||
+			!Number.isFinite(bar.open) ||
+			!Number.isFinite(bar.high) ||
+			!Number.isFinite(bar.low) ||
+			!Number.isFinite(bar.close) ||
+			!Number.isFinite(bar.volume)
+		) {
+			throw new Error(`Invalid Stooq row for date ${bar.date || 'unknown'}`);
+		}
+	}
 
 	bars.sort((a, b) => b.date.localeCompare(a.date));
 
@@ -36,60 +64,59 @@ function normalizeDaily(raw: Record<string, unknown>, collectedAt: string) {
 		assetType: 'ETF',
 		currency: 'USD',
 		frequency: 'daily',
-		source: 'alphavantage',
+		source: 'stooq',
 		collectedAt,
 		bars,
 	};
 }
 
 async function collectSpy(request: Request, env: Env): Promise<Response> {
-	// Authenticate
 	const auth = request.headers.get('Authorization') ?? '';
 	if (auth !== `Bearer ${env.COLLECT_TOKEN}`) {
 		return new Response('Unauthorized', { status: 401 });
 	}
 
-	// Fetch from Alpha Vantage
-	const apiUrl = new URL('https://www.alphavantage.co/query');
-	apiUrl.searchParams.set('function', 'TIME_SERIES_DAILY');
-	apiUrl.searchParams.set('symbol', 'SPY');
-	apiUrl.searchParams.set('outputsize', 'compact');
-	apiUrl.searchParams.set('apikey', env.ALPHA_VANTAGE_API_KEY);
+	const stooqResponse = await fetch('https://stooq.com/q/d/l/?s=spy.us&i=d');
 
-	const avResponse = await fetch(apiUrl);
-	if (!avResponse.ok) {
-		return Response.json({ status: 'error', message: `Alpha Vantage HTTP ${avResponse.status}` }, { status: 502 });
+	if (!stooqResponse.ok) {
+		return Response.json({ status: 'error', message: `Stooq HTTP ${stooqResponse.status}` }, { status: 502 });
 	}
 
-	const raw = (await avResponse.json()) as Record<string, unknown>;
+	const rawCsv = await stooqResponse.text();
 
-	// Validate — never write error messages as market data
-	if (raw['Error Message'] || raw['Note'] || raw['Information']) {
-		const msg = (raw['Error Message'] ?? raw['Note'] ?? raw['Information']) as string;
-		return Response.json({ status: 'error', message: msg }, { status: 502 });
-	}
-	if (!raw['Time Series (Daily)']) {
-		return Response.json({ status: 'error', message: 'Alpha Vantage returned no daily series' }, { status: 502 });
+	if (!rawCsv.trim()) {
+		return Response.json({ status: 'error', message: 'Stooq returned an empty response' }, { status: 502 });
 	}
 
-	// Timestamps
 	const collectedAt = new Date().toISOString();
 	const storageTimestamp = collectedAt.replace(/:/g, '-');
 
-	// Save raw
-	const rawKey = `raw/alphavantage/daily/SPY/${storageTimestamp}.json`;
-	await env.MARKET_DATA.put(rawKey, JSON.stringify(raw), {
-		httpMetadata: { contentType: 'application/json' },
+	let normalized;
+
+	try {
+		normalized = normalizeStooqDaily(rawCsv, collectedAt);
+	} catch (error) {
+		return Response.json(
+			{
+				status: 'error',
+				message: error instanceof Error ? error.message : 'Failed to parse Stooq data',
+			},
+			{ status: 502 },
+		);
+	}
+
+	const rawKey = `raw/stooq/daily/SPY/${storageTimestamp}.csv`;
+
+	await env.MARKET_DATA.put(rawKey, rawCsv, {
+		httpMetadata: { contentType: 'text/csv' },
 	});
 
-	// Normalize
-	const normalized = normalizeDaily(raw, collectedAt);
 	const normalizedKey = `normalized/daily/SPY/${storageTimestamp}.json`;
 
-	// Save normalized snapshot + latest
 	await env.MARKET_DATA.put(normalizedKey, JSON.stringify(normalized), {
 		httpMetadata: { contentType: 'application/json' },
 	});
+
 	await env.MARKET_DATA.put('normalized/daily/SPY/latest.json', JSON.stringify(normalized), {
 		httpMetadata: { contentType: 'application/json' },
 	});
@@ -97,7 +124,7 @@ async function collectSpy(request: Request, env: Env): Promise<Response> {
 	return Response.json({
 		status: 'ok',
 		symbol: 'SPY',
-		source: 'alphavantage',
+		source: 'stooq',
 		records: normalized.bars.length,
 		latestMarketDate: normalized.bars[0]?.date ?? null,
 		rawObject: rawKey,

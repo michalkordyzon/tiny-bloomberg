@@ -17,8 +17,7 @@
 			"bucket_name": "tiny-bloomberg-data"
 		}
 	]
-	// Secrets (ALPHA_VANTAGE_API_KEY, COLLECT_TOKEN) are set via:
-	//   npx wrangler secret put ALPHA_VANTAGE_API_KEY
+	// Secret COLLECT_TOKEN is set via:
 	//   npx wrangler secret put COLLECT_TOKEN
 	// For local dev, values are in .dev.vars (never commit that file)
 	/**
