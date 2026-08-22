@@ -885,15 +885,15 @@ Now you have a known-good recovery point.
 
 By the end, every statement below should be true:
 
-* [ ] GitHub repository exists.
-* [ ] Worker project is TypeScript.
-* [ ] `/health` works locally.
-* [ ] `tiny-bloomberg-data` R2 bucket exists.
-* [ ] `MARKET_DATA` binding works.
-* [ ] Alpha Vantage API key is **not** in Git.
-* [ ] Worker can fetch real SPY daily data.
-* [ ] Invalid Alpha Vantage responses are rejected.
-* [ ] Original Alpha Vantage JSON is stored in `raw/`.
+* [x] GitHub repository exists.
+* [x] Worker project is TypeScript.
+* [x] `/health` works locally.
+* [x] `tiny-bloomberg-data` R2 bucket exists.
+* [x] `MARKET_DATA` binding works.
+* [x] Alpha Vantage API key is **not** in Git.
+* [-] Worker can fetch real SPY daily data.(ALPHA VANTAGE IS SHITTY)
+* [-] Invalid Alpha Vantage responses are rejected.
+* [-] Original Alpha Vantage JSON is stored in `raw/`.
 * [ ] Provider-independent JSON is stored in `normalized/`.
 * [ ] `normalized/daily/SPY/latest.json` exists.
 * [ ] Production Worker is deployed.

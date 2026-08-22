@@ -4,7 +4,7 @@ This file provides guidance to agents when working with code in this repository.
 
 ## Project
 
-**Tiny Bloomberg** — a Cloudflare Worker (TypeScript) that collects daily OHLCV market data from Alpha Vantage, stores it in R2, and serves it via a JSON API. See [`001-architecture.md`](001-architecture.md) and [`002-implementation.md`](002-implementation.md) for full spec.
+**Tiny Bloomberg** — a Cloudflare Worker (TypeScript) that collects daily OHLCV market data from Alpaca, stores it in R2, and serves it via a JSON API. See [`001-architecture.md`](001-architecture.md) and [`002-implementation.md`](002-implementation.md) for full spec.
 
 All worker code lives in [`tiny-bloomberg/`](tiny-bloomberg/). Run all commands from that directory.
 
